@@ -5,6 +5,9 @@ export const siteConfig = {
     "静岡県の賃貸・購入物件データを比較し、掲載が消えた物件を入居済み候補として抽出するツールの公式サイトです。",
   locale: "ja_JP",
   githubUrl: "https://github.com/twinnetshizuoka-wq/move_in_search_wapp",
+  releaseUrl:
+    "https://github.com/twinnetshizuoka-wq/move_in_search_wapp/releases/latest",
+  downloadZipName: "入居発見ツール.zip",
   keywords: [
     "賃貸",
     "不動産",

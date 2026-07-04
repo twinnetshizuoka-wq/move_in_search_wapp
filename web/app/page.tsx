@@ -14,15 +14,15 @@ const features = [
       "古い取得データと新しい取得データを比較し、掲載が消えた物件を入居済み候補として抽出します。",
   },
   {
-    title: "半自動で運用しやすい",
+    title: "ダブルクリックで使える",
     description:
-      "ブラウザで検索条件を設定し、Enter を押すだけで一覧取得を開始できるローカルツールです。",
+      "zip を展開して「スタート.bat」をダブルクリックするだけ。コマンド入力やプログラミング知識は不要です。",
   },
 ];
 
 const steps = [
-  "GitHubからツールをダウンロード",
-  "PCで起動",
+  "GitHubから「入居発見ツール.zip」をダウンロードして展開",
+  "「スタート.bat」をダブルクリックしてPCで起動",
   "ブラウザでアットホーム等の物件一覧ページを開く",
   "ターミナルでEnterを押す",
   "CSVが出力される",
@@ -35,9 +35,14 @@ const faqs = [
       "不動産サイトの掲載変化を追い、掲載が消えた物件を入居済み候補として見つけるための支援ツールです。",
   },
   {
+    question: "プログラミングの知識は必要ですか？",
+    answer:
+      "不要です。zip をダウンロードして「スタート.bat」をダブルクリックするだけで使えます。",
+  },
+  {
     question: "Vercel 上でスクレイピングは動きますか？",
     answer:
-      "いいえ。Playwright を使う取得処理はローカル PC 上の Python アプリで実行します。このサイトは公開用のホームページです。",
+      "いいえ。Playwright を使う取得処理はローカル PC 上のアプリで実行します。このサイトは公開用のホームページです。",
   },
   {
     question: "AdSense はいつ追加できますか？",
@@ -57,8 +62,8 @@ export default function HomePage() {
           <a className="button button-primary" href="#how-it-works">
             β版を利用する
           </a>
-          <a className="button button-secondary" href="#beta">
-            β版を起動する
+          <a className="button button-secondary" href="#faq">
+            よくある質問
           </a>
         </div>
       </section>
@@ -76,7 +81,8 @@ export default function HomePage() {
         <span className="hero-badge">ローカル版として利用</span>
         <h2>β版を起動する</h2>
         <p>
-          現在のβ版は、お使いの PC 上で動かすローカルツールです。Vercel
+          現在のβ版は、お使いの PC 上で動かすローカルツールです。ダウンロードするファイルは
+          zip 1つだけで、展開後に「スタート.bat」をダブルクリックすれば使えます。Vercel
           上では Playwright を直接起動できないため、Web
           ブラウザだけで完結する版は今後対応予定です。
         </p>
@@ -86,11 +92,11 @@ export default function HomePage() {
           </a>
           <a
             className="button button-secondary"
-            href={siteConfig.githubUrl}
+            href={siteConfig.releaseUrl}
             target="_blank"
             rel="noopener noreferrer"
           >
-            GitHubで見る
+            zipをダウンロード
           </a>
         </div>
       </section>
@@ -101,7 +107,7 @@ export default function HomePage() {
       <section className="card" id="how-it-works">
         <h2>使い方</h2>
         <p className="section-lead">
-          β版はローカル PC で起動して利用します。手順は次のとおりです。
+          β版はローカル PC で起動して利用します。コマンド入力は不要です。
         </p>
         <ol className="steps">
           {steps.map((step) => (
@@ -114,11 +120,19 @@ export default function HomePage() {
         <div className="hero-actions">
           <a
             className="button button-primary"
+            href={siteConfig.releaseUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {siteConfig.downloadZipName} をダウンロード
+          </a>
+          <a
+            className="button button-secondary"
             href={siteConfig.githubUrl}
             target="_blank"
             rel="noopener noreferrer"
           >
-            GitHubからダウンロード
+            GitHubで見る
           </a>
         </div>
       </section>
@@ -140,6 +154,14 @@ export default function HomePage() {
           {siteConfig.name} — ローカルツールと公開サイトを分けて運用する構成です。
         </p>
         <p>
+          <a
+            href={siteConfig.releaseUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            配布用 zip
+          </a>
+          {" / "}
           <a
             href={siteConfig.githubUrl}
             target="_blank"

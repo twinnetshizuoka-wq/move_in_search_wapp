@@ -300,9 +300,14 @@ class RentalDiscoveryApp:
         messagebox.showerror("比較エラー", message)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    args = sys.argv[1:] if argv is None else argv
+    open_compare = "--compare" in args
+
     root = tk.Tk()
-    RentalDiscoveryApp(root)
+    app = RentalDiscoveryApp(root)
+    if open_compare and not app.compare_visible:
+        app._toggle_compare_panel()
     root.mainloop()
 
 

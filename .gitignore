@@ -8,6 +8,10 @@ venv/
 
 # Data exports
 data/*.csv
+!data/.gitkeep
+
+# Release packages
+dist/
 
 # Node / Next.js
 web/node_modules/
