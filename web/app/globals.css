@@ -125,15 +125,52 @@ code {
   box-shadow: var(--shadow);
 }
 
+.card + .card,
+.section-grid + .card,
+.ad-placeholder + .card,
+.ad-section + .card {
+  margin-top: 28px;
+}
+
 .card h2,
 .card h3 {
   margin-top: 0;
 }
 
-.card p:last-child,
-.steps li:last-child,
+.card p {
+  color: var(--muted);
+}
+
 .faq-item p:last-child {
   margin-bottom: 0;
+}
+
+.beta-section {
+  display: grid;
+  gap: 16px;
+  scroll-margin-top: 24px;
+}
+
+.beta-section p {
+  margin: 0;
+  max-width: 720px;
+}
+
+#how-it-works {
+  scroll-margin-top: 24px;
+}
+
+.section-lead {
+  margin: 0 0 16px;
+}
+
+.notice {
+  margin: 20px 0;
+  padding: 14px 16px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: var(--primary-dark);
+  font-weight: 600;
 }
 
 .steps {

@@ -21,10 +21,11 @@ const features = [
 ];
 
 const steps = [
-  "アットホームまたはしずナビで、市区町村まで絞り込んだ一覧ページを表示する",
-  "ツールで Enter を押して物件情報を CSV 保存する",
-  "1か月後などに同じ条件でもう一度取得する",
-  "古い CSV と新しい CSV を比較して入居済み候補を出力する",
+  "GitHubからツールをダウンロード",
+  "PCで起動",
+  "ブラウザでアットホーム等の物件一覧ページを開く",
+  "ターミナルでEnterを押す",
+  "CSVが出力される",
 ];
 
 const faqs = [
@@ -36,7 +37,7 @@ const faqs = [
   {
     question: "Vercel 上でスクレイピングは動きますか？",
     answer:
-      "いいえ。スクレイピングと比較処理はローカル PC 上の Python アプリで実行します。このサイトは公開用のホームページです。",
+      "いいえ。Playwright を使う取得処理はローカル PC 上の Python アプリで実行します。このサイトは公開用のホームページです。",
   },
   {
     question: "AdSense はいつ追加できますか？",
@@ -54,10 +55,10 @@ export default function HomePage() {
         <p>{siteConfig.description}</p>
         <div className="hero-actions">
           <a className="button button-primary" href="#how-it-works">
-            使い方を見る
+            β版を利用する
           </a>
-          <a className="button button-secondary" href="#faq">
-            よくある質問
+          <a className="button button-secondary" href="#beta">
+            β版を起動する
           </a>
         </div>
       </section>
@@ -71,16 +72,55 @@ export default function HomePage() {
         ))}
       </section>
 
+      <section className="card beta-section" id="beta">
+        <span className="hero-badge">ローカル版として利用</span>
+        <h2>β版を起動する</h2>
+        <p>
+          現在のβ版は、お使いの PC 上で動かすローカルツールです。Vercel
+          上では Playwright を直接起動できないため、Web
+          ブラウザだけで完結する版は今後対応予定です。
+        </p>
+        <div className="hero-actions">
+          <a className="button button-primary" href="#how-it-works">
+            β版を利用する
+          </a>
+          <a
+            className="button button-secondary"
+            href={siteConfig.githubUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHubで見る
+          </a>
+        </div>
+      </section>
+
       <HomeAdSection />
       <AdSlotPlaceholder />
 
       <section className="card" id="how-it-works">
         <h2>使い方</h2>
+        <p className="section-lead">
+          β版はローカル PC で起動して利用します。手順は次のとおりです。
+        </p>
         <ol className="steps">
           {steps.map((step) => (
             <li key={step}>{step}</li>
           ))}
         </ol>
+        <p className="notice">
+          Webブラウザだけで完結する版は今後対応予定です。
+        </p>
+        <div className="hero-actions">
+          <a
+            className="button button-primary"
+            href={siteConfig.githubUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHubからダウンロード
+          </a>
+        </div>
       </section>
 
       <section className="card" id="faq">
@@ -98,6 +138,15 @@ export default function HomePage() {
       <footer className="site-footer">
         <p>
           {siteConfig.name} — ローカルツールと公開サイトを分けて運用する構成です。
+        </p>
+        <p>
+          <a
+            href={siteConfig.githubUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            GitHub リポジトリ
+          </a>
         </p>
       </footer>
     </main>
