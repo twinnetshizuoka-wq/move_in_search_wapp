@@ -17,23 +17,40 @@ from rental_files import (
     JST,
     RentalFileError,
     build_nyukyo_output_path,
+    build_tasha_output_path,
     parse_rental_filename,
     validate_compare_pair,
+    validate_cross_compare_pair,
 )
-from rental_match import property_match_key
+from rental_match import normalize_property_name, property_match_key
 
 # 必須カラム（物件の同一性判定に使用）
 REQUIRED_COLUMNS = ["property_name", "room_number", "address"]
+NAME_ONLY_REQUIRED_COLUMNS = ["property_name"]
 MATCH_KEY_COLUMNS = ["_match_name", "_match_address", "_match_room"]
 
 DEFAULT_DATA_DIR = Path("data")
+CROSS_OUTPUT_COLUMNS = [
+    "property_name",
+    "source",
+    "address",
+    "access",
+    "room_number",
+    "features",
+    "source_url",
+    "fetched_at",
+]
 
 
 class CompareError(Exception):
     """比較処理に関するエラー"""
 
 
-def load_csv(file_path: Path) -> pd.DataFrame:
+def load_csv(
+    file_path: Path,
+    *,
+    required_columns: list[str] | None = None,
+) -> pd.DataFrame:
     """CSVファイルを読み込む。"""
     if not file_path.exists():
         raise CompareError(f"ファイルが見つかりません: {file_path}")
@@ -41,6 +58,7 @@ def load_csv(file_path: Path) -> pd.DataFrame:
     if not file_path.is_file():
         raise CompareError(f"ファイルではありません: {file_path}")
 
+    required = required_columns or REQUIRED_COLUMNS
     encodings = ["utf-8-sig", "utf-8", "cp932"]
     last_error: Exception | None = None
     df: pd.DataFrame | None = None
@@ -68,22 +86,25 @@ def load_csv(file_path: Path) -> pd.DataFrame:
 
     df.columns = df.columns.str.strip()
 
-    missing_columns = [col for col in REQUIRED_COLUMNS if col not in df.columns]
+    missing_columns = [col for col in required if col not in df.columns]
     if missing_columns:
         raise CompareError(
             f"必須カラムが不足しています: {file_path}\n"
             f"不足カラム: {', '.join(missing_columns)}\n"
-            f"必要なカラム: {', '.join(REQUIRED_COLUMNS)}"
+            f"必要なカラム: {', '.join(required)}"
         )
 
-    for col in REQUIRED_COLUMNS:
+    for col in required:
         df[col] = df[col].astype(str).str.strip()
 
-    invalid_mask = (
-        df[REQUIRED_COLUMNS].eq("").any(axis=1)
-        | df[REQUIRED_COLUMNS].eq("nan").any(axis=1)
-    )
-    invalid_count = invalid_mask.sum()
+    # 任意カラムを文字列化（他社比較用）
+    for col in ("address", "access", "room_number", "features", "source_url", "fetched_at"):
+        if col in df.columns:
+            df[col] = df[col].fillna("").astype(str).str.strip()
+            df.loc[df[col].isin({"nan", "None"}), col] = ""
+
+    invalid_mask = df[required].eq("").any(axis=1) | df[required].eq("nan").any(axis=1)
+    invalid_count = int(invalid_mask.sum())
     if invalid_count > 0:
         print(
             f"警告: {file_path} にキーが空の行が {invalid_count} 件あります。これらは比較から除外します。",
@@ -167,13 +188,25 @@ def compare_rental_data(
             data_dir,
         )
 
+    source_label = {
+        "ah": "アットホーム",
+        "hs": "HOME'S",
+        "sz": "しずナビ",
+    }.get(old_meta.source, old_meta.source or "不明")
+
     print(f"古いファイル: {old_csv.name}")
     print(f"  作成日時: {old_meta.captured_at.strftime('%Y/%m/%d %H:%M')}")
-    print(f"  対象: chintai / {old_meta.prefecture} / {old_meta.city}")
+    print(
+        f"  対象: {source_label} / {old_meta.rental_type} / "
+        f"{old_meta.prefecture} / {old_meta.city}"
+    )
 
     print(f"新しいファイル: {new_csv.name}")
     print(f"  作成日時: {new_meta.captured_at.strftime('%Y/%m/%d %H:%M')}")
-    print(f"  対象: chintai / {new_meta.prefecture} / {new_meta.city}")
+    print(
+        f"  対象: {source_label} / {new_meta.rental_type} / "
+        f"{new_meta.prefecture} / {new_meta.city}"
+    )
 
     print(f"\n旧データを読み込み中: {old_csv}")
     old_df = load_csv(old_csv)
@@ -192,6 +225,97 @@ def compare_rental_data(
     return len(moved_in), output_csv
 
 
+def _tag_source_rows(df: pd.DataFrame, source: str) -> pd.DataFrame:
+    """他社比較用に source 列を付与し、出力列を揃える。"""
+    tagged = df.copy()
+    tagged["source"] = source
+    if "access" not in tagged.columns:
+        tagged["access"] = ""
+    for col in CROSS_OUTPUT_COLUMNS:
+        if col not in tagged.columns:
+            tagged[col] = ""
+    return tagged[CROSS_OUTPUT_COLUMNS]
+
+
+def extract_cross_name_matches(
+    ah_df: pd.DataFrame,
+    hs_df: pd.DataFrame,
+) -> pd.DataFrame:
+    """物件名が一致する行を両社分抽出する。"""
+    ah = ah_df.copy()
+    hs = hs_df.copy()
+    ah["_match_name"] = ah["property_name"].map(normalize_property_name)
+    hs["_match_name"] = hs["property_name"].map(normalize_property_name)
+
+    common_names = set(ah["_match_name"]) & set(hs["_match_name"])
+    common_names.discard("")
+    if not common_names:
+        return pd.DataFrame(columns=CROSS_OUTPUT_COLUMNS)
+
+    ah_matched = _tag_source_rows(ah[ah["_match_name"].isin(common_names)], "ah")
+    hs_matched = _tag_source_rows(hs[hs["_match_name"].isin(common_names)], "hs")
+    result = pd.concat([ah_matched, hs_matched], ignore_index=True)
+    result["_sort_name"] = result["property_name"].map(normalize_property_name)
+    result = result.sort_values(
+        by=["_sort_name", "source", "room_number", "address"],
+        kind="stable",
+    ).drop(columns=["_sort_name"])
+    return result.reset_index(drop=True)
+
+
+def compare_cross_company_data(
+    athome_csv: Path,
+    homes_csv: Path,
+    output_csv: Path | None = None,
+    data_dir: Path = DEFAULT_DATA_DIR,
+) -> tuple[int, Path]:
+    """
+    アットホームと HOME'S のCSVから、物件名が一致する物件を抽出する。
+
+    Returns:
+        (抽出件数, 出力ファイルパス)
+    """
+    try:
+        ah_meta = parse_rental_filename(athome_csv)
+        hs_meta = parse_rental_filename(homes_csv)
+        validate_cross_compare_pair(ah_meta, hs_meta)
+    except RentalFileError as exc:
+        raise CompareError(str(exc)) from exc
+
+    if output_csv is None:
+        output_csv = build_tasha_output_path(datetime.now(JST), ah_meta, data_dir)
+
+    print(f"アットホーム: {athome_csv.name}")
+    print(
+        f"  対象: {ah_meta.rental_type} / {ah_meta.prefecture} / {ah_meta.city}"
+    )
+    print(f"HOME'S: {homes_csv.name}")
+    print(
+        f"  対象: {hs_meta.rental_type} / {hs_meta.prefecture} / {hs_meta.city}"
+    )
+
+    print(f"\nアットホームデータを読み込み中: {athome_csv}")
+    ah_df = load_csv(athome_csv, required_columns=NAME_ONLY_REQUIRED_COLUMNS)
+    print(f"  → {len(ah_df)} 件")
+
+    print(f"HOME'S データを読み込み中: {homes_csv}")
+    hs_df = load_csv(homes_csv, required_columns=NAME_ONLY_REQUIRED_COLUMNS)
+    print(f"  → {len(hs_df)} 件")
+
+    matched = extract_cross_name_matches(ah_df, hs_df)
+    save_csv(matched, output_csv)
+
+    name_count = (
+        matched["property_name"].map(normalize_property_name).nunique()
+        if not matched.empty
+        else 0
+    )
+    print(f"\n物件名一致: {name_count} 件（出力行 {len(matched)} 行）")
+    print(f"出力先: {output_csv.resolve()}")
+
+    return len(matched), output_csv
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """コマンドライン引数を解析する。"""
     parser = argparse.ArgumentParser(
@@ -200,12 +324,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--old",
         type=Path,
-        help="古い取得CSV（chintai_都道府県_市区町村_YYYYMMDDHHMM.csv）",
+        help="古い取得CSV（ah_chintai_都道府県_市区町村_YYYYMMDDHHMM.csv など）",
     )
     parser.add_argument(
         "--new",
         type=Path,
-        help="新しい取得CSV（chintai_都道府県_市区町村_YYYYMMDDHHMM.csv）",
+        help="新しい取得CSV（ah_chintai_都道府県_市区町村_YYYYMMDDHHMM.csv など）",
     )
     parser.add_argument(
         "-o",

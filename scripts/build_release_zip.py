@@ -23,6 +23,8 @@ INCLUDE_FILES = [
     "rental_match.py",
     "scrape_athome.py",
     "scrape_athome_buy.py",
+    "scrape_homes.py",
+    "scrape_homes_buy.py",
     "scrape_shizunabi_buy.py",
     "scripts/ensure_env.bat",
 ]

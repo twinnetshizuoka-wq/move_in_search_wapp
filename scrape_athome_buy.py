@@ -33,7 +33,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "出力 CSV のパス（省略時は data/kounyu_都道府県_市区町村_YYYYMMDDHHMM.csv を自動生成）"
+            "出力 CSV のパス（省略時は data/ah_kounyu_都道府県_市区町村_YYYYMMDDHHMM.csv を自動生成）"
         ),
     )
     if argv is None:

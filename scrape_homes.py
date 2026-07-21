@@ -1,8 +1,8 @@
 """
-アットホーム半自動物件情報取得ツール
+LIFULL HOME'S 半自動賃貸物件情報取得ツール
 
 Playwright でブラウザを表示し、ユーザーが手動で検索条件を設定した後、
-物件一覧ページから物件情報を CSV に保存します。
+賃貸物件一覧ページから物件情報を CSV に保存します。
 """
 
 from __future__ import annotations
@@ -14,28 +14,23 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
-from rental_files import JST, RentalFileError, build_scrape_output_path
-from scraper.athome import (
-    ATHOME_TOP_URL,
-    ScrapeError,
+from rental_files import JST, RentalFileError, build_homes_output_path
+from scraper.athome import ScrapeError
+from scraper.homes import (
+    CHINTAI_CONFIG,
+    HOMES_TOP_URL,
     scrape_current_session,
     set_scraper_config,
     wait_for_user_start,
 )
-from scraper.config import CHINTAI_CONFIG
-
 
 DEFAULT_DATA_DIR = Path("data")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    """コマンドライン引数を解析する。
-
-    argv を渡す場合はオプションのみ（例: ["-o", "data/out.csv"]）を渡す。
-    スクリプト名を含めないこと。省略時は sys.argv[1:] が使われる。
-    """
+    """コマンドライン引数を解析する。"""
     parser = argparse.ArgumentParser(
-        description="アットホームの賃貸物件一覧から物件情報を半自動取得します。",
+        description="LIFULL HOME'S の賃貸物件一覧から物件情報を半自動取得します。",
     )
     parser.add_argument(
         "-o",
@@ -43,7 +38,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         type=Path,
         default=None,
         help=(
-            "出力 CSV のパス（省略時は data/ah_chintai_都道府県_市区町村_YYYYMMDDHHMM.csv を自動生成）"
+            "出力 CSV のパス（省略時は data/hs_chintai_都道府県_市区町村_YYYYMMDDHHMM.csv を自動生成）"
         ),
     )
     if argv is None:
@@ -52,7 +47,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def run_scraper(output_csv: Path | None) -> tuple[int, Path]:
-    """ブラウザを起動し、物件情報の取得を実行する。"""
+    """ブラウザを起動し、賃貸物件情報の取得を実行する。"""
     set_scraper_config(CHINTAI_CONFIG)
     print("Playwright でブラウザを起動します（表示あり）...")
 
@@ -66,14 +61,14 @@ def run_scraper(output_csv: Path | None) -> tuple[int, Path]:
         resolved_output = output_csv
 
         try:
-            print(f"アットホームを開きます: {ATHOME_TOP_URL}")
-            page.goto(ATHOME_TOP_URL, wait_until="domcontentloaded", timeout=60000)
+            print(f"HOME'S 賃貸トップを開きます: {HOMES_TOP_URL}")
+            page.goto(HOMES_TOP_URL, wait_until="domcontentloaded", timeout=60000)
 
             wait_for_user_start(page)
 
             if resolved_output is None:
                 try:
-                    resolved_output = build_scrape_output_path(
+                    resolved_output = build_homes_output_path(
                         datetime.now(JST),
                         page.url,
                         DEFAULT_DATA_DIR,
@@ -126,7 +121,9 @@ def main() -> None:
             print("\n物件は取得できませんでした。一覧ページの表示を確認してください。")
         else:
             print("\n処理が完了しました。")
-            print(f"比較する場合は python app.py を実行し、{output_path.name} を指定してください。")
+            print(
+                f"比較する場合は python app.py を実行し、{output_path.name} を指定してください。"
+            )
     except KeyboardInterrupt:
         sys.exit(130)
     except ScrapeError:

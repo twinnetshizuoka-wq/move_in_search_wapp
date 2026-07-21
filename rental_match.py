@@ -13,9 +13,17 @@ def normalize_text(value: str) -> str:
     return unicodedata.normalize("NFKC", (value or "").strip())
 
 
+FLOOR_BUILDING_SUFFIX_PATTERN = re.compile(
+    r"[\s　]*(?:\d+|[０-９]+)階建\s*$|[\s　]*平屋建\s*$"
+)
+
+
 def normalize_property_name(name: str) -> str:
     """物件名を比較用に正規化する。"""
-    return normalize_text(name)
+    value = normalize_text(name)
+    # アットホーム由来の「〇階建」表記ゆれを吸収
+    value = FLOOR_BUILDING_SUFFIX_PATTERN.sub("", value).strip()
+    return value
 
 
 def normalize_address(address: str) -> str:

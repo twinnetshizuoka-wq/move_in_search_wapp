@@ -204,6 +204,19 @@ def normalize_features(text: str) -> str:
     return re.sub(r"\s+", "", clean_text(text))
 
 
+FLOOR_BUILDING_SUFFIX_PATTERN = re.compile(
+    r"[\s　]*(?:\d+|[０-９]+)階建\s*$|[\s　]*平屋建\s*$"
+)
+
+
+def strip_floor_building_suffix(name: str) -> str:
+    """物件名末尾の「〇階建」「平屋建」を除去する。"""
+    value = clean_text(name)
+    if not value:
+        return ""
+    return clean_text(FLOOR_BUILDING_SUFFIX_PATTERN.sub("", value))
+
+
 def extract_features_from_text(text: str) -> str:
     """テキストから物件の特徴（建物種別など）を抽出する。"""
     match = _active_config.feature_pattern.search(text)
@@ -686,10 +699,10 @@ def extract_property_name(card: Locator) -> str:
         if name and not (
             _active_config.property_type == "kounyu" and _is_kounyu_page_heading(name)
         ):
-            return name
+            return strip_floor_building_suffix(name)
 
     if _active_config.property_type == "kounyu":
-        return _extract_kounyu_property_name(card)
+        return strip_floor_building_suffix(_extract_kounyu_property_name(card))
     return ""
 
 
