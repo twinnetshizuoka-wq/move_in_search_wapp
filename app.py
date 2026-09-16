@@ -15,7 +15,25 @@ from tkinter import filedialog, messagebox, ttk
 
 import tkinter as tk
 
+from billing_config import (
+    FREE_SCRAPE_LIMIT,
+    PAYMENT_LINK_URL,
+    PLAN_PRICE_INCLUDES_TAX,
+    PLAN_PRICE_YEN,
+    TRIAL_DAYS,
+    is_test_payment_link,
+)
 from compare import CompareError, compare_cross_company_data, compare_rental_data
+from subscription_verify import SubscriptionCheck, check_subscription
+from usage_state import (
+    can_scrape,
+    clear_subscription,
+    is_subscribed,
+    load_usage,
+    mark_subscribed,
+    record_scrape,
+    remaining_scrapes,
+)
 
 ROOT_DIR = Path(__file__).resolve().parent
 DATA_DIR = ROOT_DIR / "data"
@@ -29,8 +47,8 @@ class RentalDiscoveryApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("賃貸・購入物件 入居発見")
-        self.root.geometry("760x560")
-        self.root.minsize(680, 500)
+        self.root.geometry("760x700")
+        self.root.minsize(680, 600)
 
         self.old_file_path: Path | None = None
         self.new_file_path: Path | None = None
@@ -38,6 +56,7 @@ class RentalDiscoveryApp:
         self.homes_cross_path: Path | None = None
 
         self._build_ui()
+        self._refresh_subscription_in_background()
 
     def _build_ui(self) -> None:
         container = ttk.Frame(self.root, padding=16)
@@ -63,6 +82,58 @@ class RentalDiscoveryApp:
             text="使い方を見る",
             command=self._open_how_to,
         ).pack(side=tk.LEFT)
+
+        billing_frame = ttk.LabelFrame(container, text="ご利用プラン", padding=12)
+        billing_frame.pack(fill=tk.X, pady=(0, 12))
+
+        ttk.Label(
+            billing_frame,
+            text=(
+                f"月額 {PLAN_PRICE_YEN} 円"
+                f"{'（税込）' if PLAN_PRICE_INCLUDES_TAX else ''}。"
+                f"最初の {TRIAL_DAYS} 日間は無料です。"
+                "申し込み後にカードを登録すると、無料期間が始まります。"
+            ),
+            wraplength=680,
+        ).pack(anchor=tk.W, pady=(0, 8))
+
+        billing_buttons = ttk.Frame(billing_frame)
+        billing_buttons.pack(anchor=tk.W)
+
+        ttk.Button(
+            billing_buttons,
+            text="申し込む",
+            command=self._open_billing,
+        ).pack(side=tk.LEFT)
+
+        email_row = ttk.Frame(billing_frame)
+        email_row.pack(anchor=tk.W, fill=tk.X, pady=(10, 0))
+        ttk.Label(email_row, text="登録メール").pack(side=tk.LEFT, padx=(0, 8))
+        saved_email = str(load_usage(DATA_DIR).get("email") or "")
+        self.email_var = tk.StringVar(value=saved_email)
+        self.email_entry = ttk.Entry(email_row, textvariable=self.email_var, width=36)
+        self.email_entry.pack(side=tk.LEFT, padx=(0, 8))
+        self.verify_button = ttk.Button(
+            email_row,
+            text="登録を確認",
+            command=self._verify_subscription,
+        )
+        self.verify_button.pack(side=tk.LEFT)
+
+        self.usage_var = tk.StringVar(value="")
+        ttk.Label(
+            billing_frame,
+            textvariable=self.usage_var,
+            wraplength=680,
+        ).pack(anchor=tk.W, pady=(8, 0))
+        self._refresh_usage_label()
+
+        if is_test_payment_link():
+            ttk.Label(
+                billing_frame,
+                text="いまはテスト決済です。実際の引き落としはありません。",
+                foreground="#555555",
+            ).pack(anchor=tk.W, pady=(8, 0))
 
         scrape_frame = ttk.LabelFrame(container, text="物件情報の取得", padding=12)
         scrape_frame.pack(fill=tk.X, pady=(0, 12))
@@ -261,6 +332,121 @@ class RentalDiscoveryApp:
     def _open_how_to(self) -> None:
         self._open_url(HOW_TO_URL)
 
+    def _open_billing(self) -> None:
+        self._open_url(PAYMENT_LINK_URL)
+        self.status_var.set("決済ページをブラウザで開きました。")
+
+    def _refresh_usage_label(self) -> None:
+        leftover = remaining_scrapes(DATA_DIR)
+        if leftover is None:
+            email = str(load_usage(DATA_DIR).get("email") or "")
+            self.usage_var.set(
+                f"登録を確認しました（{email}）。取得回数の制限はありません。"
+            )
+            return
+        self.usage_var.set(
+            f"未登録でも取得は {FREE_SCRAPE_LIMIT} 回まで体験できます。"
+            f" 残り {leftover} 回です。申し込み後は登録メールで確認してください。"
+        )
+
+    def _verify_error_message(self, error: str) -> str:
+        messages = {
+            "invalid_email": "メールアドレスの形式を確認してください。",
+            "not_deployed": (
+                "確認用のページがまだ公開されていません。\n"
+                "サイト（Vercel）に最新のプログラムを公開してください。"
+            ),
+            "not_configured": (
+                "確認用の Stripe キーが未設定です。\n"
+                "Vercel の環境変数に STRIPE_SECRET_KEY を追加してください。"
+            ),
+            "lookup_failed": (
+                "Stripe への確認中にエラーになりました。\n"
+                "キーの権限（Customers / Subscriptions の読み取り）を確認してください。"
+            ),
+            "network": "ネットに接続できないため、登録を確認できませんでした。",
+            "http": "登録の確認に失敗しました。時間をおいてやり直してください。",
+            "invalid_response": "確認結果を読み取れませんでした。",
+        }
+        return messages.get(error, "登録の確認に失敗しました。")
+
+    def _apply_subscription_check(
+        self,
+        email: str,
+        result: SubscriptionCheck,
+        *,
+        silent: bool,
+    ) -> None:
+        if result.error:
+            if not silent:
+                messagebox.showerror("登録確認", self._verify_error_message(result.error))
+                self.status_var.set("登録を確認できませんでした。")
+            return
+        if result.subscribed:
+            mark_subscribed(DATA_DIR, email)
+            self._refresh_usage_label()
+            self.status_var.set("登録を確認しました。")
+            if not silent:
+                messagebox.showinfo(
+                    "登録確認",
+                    "申し込みを確認しました。取得回数の制限を解除します。",
+                )
+            return
+        clear_subscription(DATA_DIR)
+        self._refresh_usage_label()
+        self.status_var.set("このメールでは申し込みを確認できませんでした。")
+        if not silent:
+            messagebox.showwarning(
+                "登録確認",
+                "このメールでは有効な申し込みが見つかりませんでした。\n"
+                "決済時に入力したメールと同じか確認してください。",
+            )
+
+    def _verify_subscription(self) -> None:
+        email = self.email_var.get().strip()
+        if "@" not in email:
+            messagebox.showwarning("登録確認", "決済時に使ったメールアドレスを入力してください。")
+            return
+        self.verify_button.configure(state=tk.DISABLED)
+        self.status_var.set("登録を確認しています...")
+
+        def worker() -> None:
+            result = check_subscription(email)
+            self.root.after(
+                0,
+                lambda: self._on_verify_finished(email, result, silent=False),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_verify_finished(
+        self,
+        email: str,
+        result: SubscriptionCheck,
+        *,
+        silent: bool,
+    ) -> None:
+        self.verify_button.configure(state=tk.NORMAL)
+        self._apply_subscription_check(email, result, silent=silent)
+
+    def _refresh_subscription_in_background(self) -> None:
+        usage = load_usage(DATA_DIR)
+        email = str(usage.get("email") or "").strip()
+        if not email:
+            if usage.get("subscribed"):
+                clear_subscription(DATA_DIR)
+                self._refresh_usage_label()
+            return
+
+        def worker() -> None:
+            result = check_subscription(email)
+            self.root.after(
+                0,
+                lambda: self._on_verify_finished(email, result, silent=True),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _toggle_compare_panel(self) -> None:
         if self.compare_visible:
             self.compare_panel.pack_forget()
@@ -291,6 +477,21 @@ class RentalDiscoveryApp:
             messagebox.showerror("エラー", f"スクリプトが見つかりません: {script}")
             return
 
+        if not can_scrape(DATA_DIR):
+            go_billing = messagebox.askyesno(
+                "体験回数の上限です",
+                f"未登録の取得は {FREE_SCRAPE_LIMIT} 回までです。\n\n"
+                "申し込むと、最初の "
+                f"{TRIAL_DAYS} 日間は無料で使い続けられます。\n"
+                "決済ページを開きますか？\n\n"
+                "すでに申し込み済みの場合は、決済時のメールを入力して"
+                "「登録を確認」を押してください。",
+            )
+            if go_billing:
+                self._open_billing()
+            self.status_var.set("取得回数の上限に達しています。申し込み後に続けられます。")
+            return
+
         self.status_var.set(f"{title}を起動しています...")
         try:
             popen_kwargs: dict = {"cwd": str(ROOT_DIR)}
@@ -304,6 +505,10 @@ class RentalDiscoveryApp:
             messagebox.showerror("エラー", f"{title}の起動に失敗しました。\n{exc}")
             self.status_var.set(f"{title}の起動に失敗しました")
             return
+
+        if not is_subscribed(DATA_DIR):
+            record_scrape(DATA_DIR)
+            self._refresh_usage_label()
 
         self.status_var.set(f"{title}を起動しました。ブラウザとターミナルで操作を続けてください。")
         messagebox.showinfo(title, instructions)

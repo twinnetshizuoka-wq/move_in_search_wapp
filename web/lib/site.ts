@@ -8,6 +8,9 @@ export const siteConfig = {
   releaseUrl:
     "https://github.com/twinnetshizuoka-wq/move_in_search_wapp/releases/latest",
   downloadZipName: "入居発見ツール.zip",
+  planPriceYen: 550,
+  planPriceIncludesTax: true,
+  trialDays: 90,
   keywords: [
     "賃貸",
     "不動産",
@@ -28,6 +31,11 @@ export function getSiteUrl(): string {
     return `https://${process.env.VERCEL_URL}`;
   }
   return "http://localhost:3000";
+}
+
+export function getStripePaymentLink(): string | undefined {
+  const value = process.env.NEXT_PUBLIC_STRIPE_PAYMENT_LINK?.trim();
+  return value || undefined;
 }
 
 export function getAdSensePublisherId(): string | undefined {

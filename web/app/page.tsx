@@ -1,6 +1,6 @@
 import { AdSlotPlaceholder } from "@/components/adsense";
 import { HomeAdSection } from "@/components/HomeAdSection";
-import { siteConfig } from "@/lib/site";
+import { getStripePaymentLink, siteConfig } from "@/lib/site";
 
 const features = [
   {
@@ -45,6 +45,15 @@ const faqs = [
       "いいえ。Playwright を使う取得処理はローカル PC 上のアプリで実行します。このサイトは公開用のホームページです。",
   },
   {
+    question: "料金はいくらですか？",
+    answer: `月額 ${siteConfig.planPriceYen} 円${siteConfig.planPriceIncludesTax ? "（税込）" : ""}です。最初の ${siteConfig.trialDays} 日間は無料です。申し込みはアプリの「申し込む」から行えます。`,
+  },
+  {
+    question: "申し込み後、アプリで何をすればよいですか？",
+    answer:
+      "決済時に入力したメールアドレスをアプリに入れ、「登録を確認」を押してください。確認できると取得回数の制限が外れます。",
+  },
+  {
     question: "AdSense はいつ追加できますか？",
     answer:
       "Vercel の環境変数に Publisher ID と広告スロット ID を設定すれば、承認後すぐに表示できます。",
@@ -52,6 +61,8 @@ const faqs = [
 ];
 
 export default function HomePage() {
+  const paymentLink = getStripePaymentLink();
+
   return (
     <main className="page">
       <section className="hero">
@@ -99,6 +110,35 @@ export default function HomePage() {
             zipをダウンロード
           </a>
         </div>
+      </section>
+
+      <section className="card" id="pricing">
+        <span className="hero-badge">ご利用プラン</span>
+        <h2>
+          月額 {siteConfig.planPriceYen} 円
+          {siteConfig.planPriceIncludesTax ? "（税込）" : ""}
+        </h2>
+        <p>
+          最初の {siteConfig.trialDays}{" "}
+          日間は無料です。表示価格は税込です。カード登録後に無料期間が始まり、期間終了後から月額課金になります。
+          申し込みはアプリの「申し込む」ボタン、または下のボタンから行えます。
+        </p>
+        {paymentLink ? (
+          <div className="hero-actions">
+            <a
+              className="button button-primary"
+              href={paymentLink}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              申し込む
+            </a>
+          </div>
+        ) : (
+          <p className="notice">
+            サイトからの申し込みは準備中です。アプリを起動して「申し込む」を押してください。
+          </p>
+        )}
       </section>
 
       <HomeAdSection />
