@@ -52,8 +52,8 @@ class RentalDiscoveryApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("賃貸・購入物件 入居発見")
-        self.root.geometry("760x700")
-        self.root.minsize(680, 600)
+        self.root.geometry("800x780")
+        self.root.minsize(720, 520)
 
         self.old_file_path: Path | None = None
         self.new_file_path: Path | None = None
@@ -66,8 +66,44 @@ class RentalDiscoveryApp:
         self._refresh_subscription_in_background()
 
     def _build_ui(self) -> None:
-        container = ttk.Frame(self.root, padding=16)
-        container.pack(fill=tk.BOTH, expand=True)
+        self.status_var = tk.StringVar(value="準備完了")
+        status = ttk.Label(
+            self.root,
+            textvariable=self.status_var,
+            foreground="#333333",
+            padding=(16, 8),
+        )
+        status.pack(side=tk.BOTTOM, fill=tk.X)
+
+        outer = ttk.Frame(self.root)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        canvas = tk.Canvas(outer, highlightthickness=0, borderwidth=0)
+        scrollbar = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        container = ttk.Frame(canvas, padding=16)
+        window_id = canvas.create_window((0, 0), window=container, anchor=tk.NW)
+
+        def _on_frame_configure(_event: tk.Event | None = None) -> None:
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event: tk.Event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+
+        def _on_mousewheel(event: tk.Event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        container.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        container.bind("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+
+        self._scroll_canvas = canvas
+        self._content_frame = container
 
         title = ttk.Label(
             container,
@@ -322,9 +358,10 @@ class RentalDiscoveryApp:
             command=self._run_cross_compare,
         ).grid(row=4, column=0, columnspan=3, sticky=tk.W)
 
-        self.status_var = tk.StringVar(value="準備完了")
-        status = ttk.Label(container, textvariable=self.status_var, foreground="#333333")
-        status.pack(anchor=tk.W, pady=(12, 0))
+    def _scroll_content_to_bottom(self) -> None:
+        self._scroll_canvas.update_idletasks()
+        self._scroll_canvas.configure(scrollregion=self._scroll_canvas.bbox("all"))
+        self._scroll_canvas.yview_moveto(1.0)
 
     def _open_url(self, url: str) -> None:
         """既定のブラウザで URL を開く。"""
@@ -499,6 +536,7 @@ class RentalDiscoveryApp:
             self.compare_panel.pack(fill=tk.X, pady=(0, 8))
             self.compare_visible = True
             self.compare_button.configure(text="比較を閉じる")
+            self.root.after(50, self._scroll_content_to_bottom)
 
     def _toggle_cross_compare_panel(self) -> None:
         if self.cross_compare_visible:
@@ -511,6 +549,7 @@ class RentalDiscoveryApp:
             self.cross_compare_panel.pack(fill=tk.X, pady=(0, 8))
             self.cross_compare_visible = True
             self.cross_compare_button.configure(text="他社比較を閉じる")
+            self.root.after(50, self._scroll_content_to_bottom)
 
     def _launch_scrape_script(self, script_name: str, title: str, instructions: str) -> None:
         script = ROOT_DIR / script_name
