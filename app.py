@@ -16,13 +16,11 @@ from tkinter import filedialog, messagebox, ttk
 import tkinter as tk
 
 from billing_config import (
-    APP_USE_DAYS,
     FREE_SCRAPE_LIMIT,
     PAYMENT_LINK_URL,
     PLAN_PRICE_INCLUDES_TAX,
     PLAN_PRICE_YEN,
     TRIAL_DAYS,
-    UPDATE_URL,
     is_test_payment_link,
 )
 from compare import CompareError, compare_cross_company_data, compare_rental_data
@@ -30,14 +28,11 @@ from subscription_verify import SubscriptionCheck, check_subscription
 from usage_state import (
     can_scrape,
     clear_subscription,
-    ensure_first_launch,
     is_subscribed,
-    is_use_period_expired,
     load_usage,
     mark_subscribed,
     record_scrape,
     remaining_scrapes,
-    remaining_use_days,
 )
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -60,9 +55,7 @@ class RentalDiscoveryApp:
         self.athome_cross_path: Path | None = None
         self.homes_cross_path: Path | None = None
 
-        ensure_first_launch(DATA_DIR)
         self._build_ui()
-        self.root.after(200, self._warn_if_use_period_expired)
         self._refresh_subscription_in_background()
 
     def _build_ui(self) -> None:
@@ -170,6 +163,11 @@ class RentalDiscoveryApp:
             wraplength=680,
         ).pack(anchor=tk.W, pady=(8, 0))
         self._refresh_usage_label()
+        ttk.Button(
+            billing_frame,
+            text="おススメの4回消費方法",
+            command=self._show_recommended_free_uses,
+        ).pack(anchor=tk.W, pady=(8, 0))
 
         if is_test_payment_link():
             ttk.Label(
@@ -376,56 +374,36 @@ class RentalDiscoveryApp:
     def _open_how_to(self) -> None:
         self._open_url(HOW_TO_URL)
 
+    def _show_recommended_free_uses(self) -> None:
+        messagebox.showinfo(
+            "おススメの4回消費方法",
+            "同じエリアを初月と翌月にアットホームとホームズをそれぞれ1回ずつ使用してください。\n"
+            "\n"
+            "例\n"
+            "①初月に愛知県豊田市をアットホームとホームズで物件情報を取得する\n"
+            "②翌月に愛知県豊田市をアットホームとホームズで物件情報を取得する\n"
+            "③比較で初月と翌月のデータをアットホームとホームズそれぞれ比較する\n"
+            "④他社比較でアットホームとホームズのデータを比較する\n"
+            "\n"
+            "他社比較で比較されたデータが新規で入居された可能性が高い物件情報になります。",
+        )
+
     def _open_billing(self) -> None:
         self._open_url(PAYMENT_LINK_URL)
         self.status_var.set("決済ページをブラウザで開きました。")
 
     def _refresh_usage_label(self) -> None:
-        leftover_days = remaining_use_days(DATA_DIR)
-        period_text = (
-            f"この版は初回起動から {APP_USE_DAYS} 日間利用できます。"
-            f" 残り {leftover_days} 日です。"
-        )
-        if leftover_days <= 0:
-            self.usage_var.set(
-                f"この版の利用期間が終了しました。新しいバージョンに更新してください。"
-            )
-            return
         leftover = remaining_scrapes(DATA_DIR)
         if leftover is None:
             email = str(load_usage(DATA_DIR).get("email") or "")
             self.usage_var.set(
-                f"登録を確認しました（{email}）。取得回数の制限はありません。\n"
-                f"{period_text}"
+                f"登録を確認しました（{email}）。取得回数の制限はありません。"
             )
             return
         self.usage_var.set(
             f"未登録でも取得は {FREE_SCRAPE_LIMIT} 回まで体験できます。"
-            f" 残り {leftover} 回です。申し込み後は登録メールで確認してください。\n"
-            f"{period_text}"
+            f" 残り {leftover} 回です。申し込み後は登録メールで確認してください。"
         )
-
-    def _show_update_required(self) -> None:
-        go_update = messagebox.askyesno(
-            "利用期間が終了しました",
-            f"この版は初回起動から {APP_USE_DAYS} 日間利用できます。\n"
-            "利用期間が終了したため、取得・比較は使えません。\n\n"
-            "新しいバージョンのダウンロードページを開きますか？",
-        )
-        if go_update:
-            self._open_url(UPDATE_URL)
-        self.status_var.set("利用期間が終了しています。新しいバージョンに更新してください。")
-
-    def _warn_if_use_period_expired(self) -> None:
-        if is_use_period_expired(DATA_DIR):
-            self._refresh_usage_label()
-            self._show_update_required()
-
-    def _ensure_use_period(self) -> bool:
-        if not is_use_period_expired(DATA_DIR):
-            return True
-        self._show_update_required()
-        return False
 
     def _verify_error_message(self, error: str) -> str:
         messages = {
@@ -555,9 +533,6 @@ class RentalDiscoveryApp:
         script = ROOT_DIR / script_name
         if not script.exists():
             messagebox.showerror("エラー", f"スクリプトが見つかりません: {script}")
-            return
-
-        if not self._ensure_use_period():
             return
 
         if not can_scrape(DATA_DIR):
@@ -701,8 +676,6 @@ class RentalDiscoveryApp:
         )
 
     def _run_compare(self) -> None:
-        if not self._ensure_use_period():
-            return
         if self.old_file_path is None or self.new_file_path is None:
             messagebox.showwarning(
                 "ファイル未選択",
@@ -761,8 +734,6 @@ class RentalDiscoveryApp:
         messagebox.showerror("比較エラー", message)
 
     def _run_cross_compare(self) -> None:
-        if not self._ensure_use_period():
-            return
         if self.athome_cross_path is None or self.homes_cross_path is None:
             messagebox.showwarning(
                 "ファイル未選択",
