@@ -13,6 +13,14 @@ export function getStripeClient(): Stripe | null {
   });
 }
 
+export function isOwnerEmail(email: string): boolean {
+  const owners = (process.env.OWNER_EMAILS ?? "")
+    .split(",")
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return owners.includes(email.trim().toLowerCase());
+}
+
 export function normalizeEmail(value: unknown): string | null {
   if (typeof value !== "string") {
     return null;

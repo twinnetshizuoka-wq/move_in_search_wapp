@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   getStripeClient,
   hasActiveSubscription,
+  isOwnerEmail,
   normalizeEmail,
 } from "@/lib/stripe";
 
@@ -13,11 +14,6 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const stripe = getStripeClient();
-  if (!stripe) {
-    return NextResponse.json({ error: "not_configured" }, { status: 503 });
-  }
-
   let body: unknown;
   try {
     body = await request.json();
@@ -32,6 +28,15 @@ export async function POST(request: Request) {
   );
   if (!email) {
     return NextResponse.json({ error: "invalid_email" }, { status: 400 });
+  }
+
+  if (isOwnerEmail(email)) {
+    return NextResponse.json({ subscribed: true });
+  }
+
+  const stripe = getStripeClient();
+  if (!stripe) {
+    return NextResponse.json({ error: "not_configured" }, { status: 503 });
   }
 
   try {
