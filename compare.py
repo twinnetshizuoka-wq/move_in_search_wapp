@@ -94,20 +94,40 @@ def load_csv(
             f"必要なカラム: {', '.join(required)}"
         )
 
-    for col in required:
-        df[col] = df[col].astype(str).str.strip()
+    # 部屋番号は戸建て・土地など購入物件で空が正常。住所も欠けることがある。
+    # 比較キーとして必須なのは物件名のみ。
+    string_columns = list(
+        dict.fromkeys(
+            [
+                *required,
+                "address",
+                "access",
+                "room_number",
+                "features",
+                "source_url",
+                "fetched_at",
+            ]
+        )
+    )
+    for col in string_columns:
+        if col not in df.columns:
+            continue
+        df[col] = df[col].fillna("").astype(str).str.strip()
+        df.loc[df[col].isin({"nan", "None"}), col] = ""
 
-    # 任意カラムを文字列化（他社比較用）
-    for col in ("address", "access", "room_number", "features", "source_url", "fetched_at"):
-        if col in df.columns:
-            df[col] = df[col].fillna("").astype(str).str.strip()
-            df.loc[df[col].isin({"nan", "None"}), col] = ""
+    nonempty_required = ["property_name"]
+    missing_nonempty = [col for col in nonempty_required if col not in df.columns]
+    if missing_nonempty:
+        raise CompareError(
+            f"必須カラムが不足しています: {file_path}\n"
+            f"不足カラム: {', '.join(missing_nonempty)}"
+        )
 
-    invalid_mask = df[required].eq("").any(axis=1) | df[required].eq("nan").any(axis=1)
+    invalid_mask = df["property_name"].eq("") | df["property_name"].eq("nan")
     invalid_count = int(invalid_mask.sum())
     if invalid_count > 0:
         print(
-            f"警告: {file_path} にキーが空の行が {invalid_count} 件あります。これらは比較から除外します。",
+            f"警告: {file_path} に物件名が空の行が {invalid_count} 件あります。これらは比較から除外します。",
             file=sys.stderr,
         )
         df = df[~invalid_mask].copy()

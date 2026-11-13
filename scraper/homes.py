@@ -14,7 +14,15 @@ import pandas as pd
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import Locator, Page, TimeoutError as PlaywrightTimeoutError
 
-from scraper.athome import CSV_COLUMNS, ScrapeError, clean_text, wait_for_page_ready
+from scraper.athome import (
+    CSV_COLUMNS,
+    ScrapeError,
+    address_has_lot_number,
+    clean_text,
+    close_coordinate_worker,
+    fetch_html_in_page,
+    wait_for_page_ready,
+)
 
 
 @dataclass(frozen=True)
@@ -822,6 +830,8 @@ def extract_listings_from_building_card(
                 "room_number": extract_room_number_from_row(row),
                 "features": features,
                 "source_url": source_url,
+                "latitude": "",
+                "longitude": "",
                 "fetched_at": fetched_at,
             }
         )
@@ -862,6 +872,8 @@ def extract_kounyu_listings_from_card(
                 "room_number": extract_room_number_from_row(row),
                 "features": features,
                 "source_url": source_url,
+                "latitude": "",
+                "longitude": "",
                 "fetched_at": fetched_at,
             }
         )
@@ -880,6 +892,8 @@ def extract_kounyu_listings_from_card(
             "room_number": "",
             "features": features,
             "source_url": source_url,
+            "latitude": "",
+            "longitude": "",
             "fetched_at": fetched_at,
         }
     ]
@@ -907,6 +921,8 @@ def extract_listings_from_pr_card(card: Locator, fetched_at: str) -> list[dict[s
             "room_number": room_number,
             "features": features,
             "source_url": source_url,
+            "latitude": "",
+            "longitude": "",
             "fetched_at": fetched_at,
         }
     ]
@@ -998,6 +1014,148 @@ def listing_dedup_key(item: dict[str, str]) -> tuple[str, str, str, str]:
         item["room_number"],
         item["source_url"],
     )
+
+
+def is_homes_detached_house(item: dict[str, str]) -> bool:
+    """一戸建て・戸建貸家かどうか。"""
+    text = f"{item.get('features', '')} {item.get('property_name', '')}"
+    return "一戸建" in text or "戸建" in text
+
+
+def is_access_style_property_name(name: str) -> bool:
+    """物件名が「JR身延線 竪堀駅 徒歩15分」のような交通表示だけかどうか。"""
+    value = clean_text(name)
+    if not value:
+        return False
+    has_distance = bool(
+        re.search(r"徒歩|下車|\d+(?:\.\d+)?\s*[kKｋＫ][mMｍＭ]", value)
+    )
+    has_transit = "駅" in value or "線" in value or "バス" in value
+    return has_distance and has_transit
+
+
+def needs_homes_coordinates(item: dict[str, str]) -> bool:
+    """座標を取る物件か。
+
+    所在地に番地がある物件は対象外。
+    番地が無い一戸建てと、建物名が無く物件名が交通表示だけのアパートを対象にする。
+    """
+    if address_has_lot_number(item.get("address", "")):
+        return False
+    if is_homes_detached_house(item):
+        return True
+    if "土地" in item.get("features", ""):
+        return False
+    return is_access_style_property_name(item.get("property_name", ""))
+
+
+_HOMES_GEO_PATTERN = re.compile(
+    r'"geo"\s*:\s*\{[^}]{0,240}"latitude"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?'
+    r'\s*,\s*"longitude"\s*:\s*"?([0-9]+(?:\.[0-9]+)?)"?'
+)
+_HOMES_POSITION_PATTERN = re.compile(
+    r"lat&quot;:([0-9]+(?:\.[0-9]+)?),&quot;lng&quot;:([0-9]+(?:\.[0-9]+)?)"
+)
+
+
+def parse_homes_coordinates(html: str) -> tuple[str, str]:
+    """詳細ページHTMLから物件ピンの緯度・経度を取り出す。"""
+    if not html:
+        return "", ""
+    match = _HOMES_GEO_PATTERN.search(html)
+    if match:
+        return match.group(1), match.group(2)
+    match = _HOMES_POSITION_PATTERN.search(html)
+    if match:
+        return match.group(1), match.group(2)
+    return "", ""
+
+
+def _homes_background_page(page: Page, worker_box: dict[str, Page]) -> Page:
+    """座標取得用の裏タブを1枚だけ作る。一覧タブは前面に戻す。"""
+    worker = worker_box.get("page")
+    if worker is not None:
+        try:
+            if not worker.is_closed():
+                return worker
+        except PlaywrightError:
+            pass
+    worker = page.context.new_page()
+    worker_box["page"] = worker
+    try:
+        page.bring_to_front()
+    except PlaywrightError:
+        pass
+    return worker
+
+
+def fetch_homes_coordinates(
+    page: Page,
+    url: str,
+    worker_box: dict[str, Page] | None = None,
+) -> tuple[str, str]:
+    """詳細HTMLからピン座標を返す。一覧タブは開いたままにする。"""
+    html = fetch_html_in_page(page, url)
+    latitude, longitude = parse_homes_coordinates(html)
+    if latitude and longitude:
+        return latitude, longitude
+    if worker_box is None:
+        return "", ""
+
+    worker = _homes_background_page(page, worker_box)
+    try:
+        worker.goto(url, wait_until="domcontentloaded", timeout=45000)
+        if is_security_check_page(worker):
+            try:
+                page.bring_to_front()
+            except PlaywrightError:
+                pass
+            wait_for_security_cleared(worker)
+        return parse_homes_coordinates(worker.content())
+    except PlaywrightError as exc:
+        print(f"  座標を取得できませんでした: {url} ({exc})", flush=True)
+        return "", ""
+    finally:
+        try:
+            page.bring_to_front()
+        except PlaywrightError:
+            pass
+
+
+def fill_homes_coordinates(
+    page: Page,
+    listings: list[dict[str, str]],
+    cache: dict[str, tuple[str, str]],
+    worker_box: dict[str, Page] | None = None,
+) -> None:
+    """番地の無い一戸建てと、番地が無く名前が交通表示だけの物件について座標を埋める。"""
+    for item in listings:
+        item.setdefault("latitude", "")
+        item.setdefault("longitude", "")
+        if not needs_homes_coordinates(item):
+            continue
+
+        url = item.get("source_url", "")
+        if not url:
+            continue
+        if url in cache:
+            item["latitude"], item["longitude"] = cache[url]
+            continue
+
+        print(
+            f"  座標を取得中: {item.get('property_name', '')} "
+            f"{item.get('address', '')} {url}",
+            flush=True,
+        )
+        latitude, longitude = fetch_homes_coordinates(page, url, worker_box)
+        cache[url] = (latitude, longitude)
+        item["latitude"] = latitude
+        item["longitude"] = longitude
+        if latitude and longitude:
+            print(f"    緯度 {latitude} / 経度 {longitude}", flush=True)
+        else:
+            print("    座標は見つかりませんでした", flush=True)
+        time.sleep(random.uniform(0.8, 1.8))
 
 
 def _is_next_control_enabled(candidate: Locator) -> bool:
@@ -1224,6 +1382,8 @@ def scrape_current_session(
 
     all_listings: list[dict[str, str]] = []
     seen_keys: set[tuple[str, str, str, str]] = set()
+    coordinate_cache: dict[str, tuple[str, str]] = {}
+    coordinate_worker: dict[str, Page] = {}
     page_number = parse_homes_page_number(page.url)
 
     try:
@@ -1262,6 +1422,12 @@ def scrape_current_session(
                 continue
 
             page_listings = extract_page_listings(page)
+            fill_homes_coordinates(
+                page,
+                page_listings,
+                coordinate_cache,
+                coordinate_worker,
+            )
 
             new_count = 0
             for item in page_listings:
@@ -1328,6 +1494,8 @@ def scrape_current_session(
         print(f"\n中断されました。{len(all_listings)} 件を {output_csv.resolve()} に保存しました。")
         print("ターミナルの × で閉じても問題ありません。", flush=True)
         raise
+    finally:
+        close_coordinate_worker(page, coordinate_worker)
 
     return all_listings
 

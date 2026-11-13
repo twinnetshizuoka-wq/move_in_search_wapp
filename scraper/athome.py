@@ -22,6 +22,8 @@ CSV_COLUMNS = [
     "room_number",
     "features",
     "source_url",
+    "latitude",
+    "longitude",
     "fetched_at",
 ]
 
@@ -217,6 +219,259 @@ def strip_floor_building_suffix(name: str) -> str:
     return clean_text(FLOOR_BUILDING_SUFFIX_PATTERN.sub("", value))
 
 
+_SALE_TYPE_PREFIX_PATTERN = re.compile(
+    r"^(?:リフォーム・リノベーション|新築一戸建て|中古一戸建て|未入居一戸建て|"
+    r"新築マンション|中古マンション)\s+"
+)
+_STATION_PAREN_PATTERN = re.compile(r"\s*[（(][^（）()]*駅[）)]")
+_FLOOR_PHRASE_PATTERN = re.compile(
+    r"(?:\s*地上(?:\d+|[０-９]+)階地下(?:(?:\d+|[０-９]+)階建)?"
+    r"|\s*(?:\d+|[０-９]+)階建"
+    r"|\s*平屋建)+"
+)
+_LAYOUT_SUFFIX_PATTERN = re.compile(
+    r"\s*[0-9０-９]{1,2}[SLDKRＳＬＤＫＲ]+$"
+)
+_CITY_NAME_PATTERN = re.compile(r"^.+[市区町村郡]$")
+_GEO_LAT_LON_PATTERN = re.compile(
+    r'"latitude"\s*:\s*"([0-9]+(?:\.[0-9]+)?)"\s*,\s*"longitude"\s*:\s*"([0-9]+(?:\.[0-9]+)?)"'
+)
+_IDO_KEIDO_PATTERN = re.compile(
+    r'\\?"ido\\?"\s*:\s*\\?"([0-9]+(?:\.[0-9]+)?)\\?"\s*,\s*\\?"keido\\?"\s*:\s*\\?"([0-9]+(?:\.[0-9]+)?)\\?"'
+)
+
+
+def _normalize_address_digits(text: str) -> str:
+    """住所中の全角数字を半角にする。"""
+    return clean_text(text).translate(str.maketrans("０１２３４５６７８９", "0123456789"))
+
+
+def address_has_lot_number(address: str) -> bool:
+    """所在地に番地（または番地に相当する番号）が含まれるか。"""
+    value = _normalize_address_digits(address)
+    if not value:
+        return False
+    if "番" in value:
+        return True
+    if re.search(r"\d+\s*[-－ー−]\s*\d+", value):
+        return True
+    if re.search(r"\d+\s*号(?!室)", value):
+        return True
+    without_chome = re.sub(r"\d+\s*丁目", "", value)
+    return bool(re.search(r"\d", without_chome))
+
+
+def is_detached_house(item: dict[str, str]) -> bool:
+    """一戸建て・戸建かどうか。"""
+    text = f"{item.get('features', '')} {item.get('property_name', '')}"
+    return "一戸建" in text or "戸建" in text
+
+
+def needs_athome_coordinates(item: dict[str, str]) -> bool:
+    """座標を取る物件か。
+
+    所在地に番地がある物件は対象外。
+    番地が無い一戸建てと、物件名が市と町名だけの物件を対象にする。
+    """
+    if address_has_lot_number(item.get("address", "")):
+        return False
+    if is_detached_house(item):
+        return True
+    return is_city_town_property_name(item.get("property_name", ""))
+
+
+def is_city_town_property_name(name: str) -> bool:
+    """物件名が「富士市 八幡町」のように市区町村と町名だけかどうか。
+
+    駅名の括弧、階建、間取り、購入種別の前置きは除いて判定する。
+    建物名（エバーライフⅡ など）は対象外。
+    """
+    value = clean_text(name)
+    if not value:
+        return False
+    value = _SALE_TYPE_PREFIX_PATTERN.sub("", value)
+    value = _STATION_PAREN_PATTERN.sub("", value)
+    value = _FLOOR_PHRASE_PATTERN.sub("", value)
+    value = _LAYOUT_SUFFIX_PATTERN.sub("", value)
+    value = clean_text(value)
+    parts = value.split(" ")
+    if len(parts) != 2:
+        return False
+    city, town = parts
+    return bool(town) and _CITY_NAME_PATTERN.fullmatch(city) is not None
+
+
+def absolute_athome_url(url: str) -> str:
+    """相対URLをアットホームの絶対URLにする。"""
+    value = (url or "").strip()
+    if not value:
+        return ""
+    if value.startswith("http://") or value.startswith("https://"):
+        return value
+    if value.startswith("/"):
+        return "https://www.athome.co.jp" + value
+    return "https://www.athome.co.jp/" + value
+
+
+def parse_coordinates_from_html(html: str) -> tuple[str, str]:
+    """詳細ページHTMLから緯度・経度を取り出す。"""
+    if not html:
+        return "", ""
+    match = _GEO_LAT_LON_PATTERN.search(html)
+    if match:
+        return match.group(1), match.group(2)
+    match = _IDO_KEIDO_PATTERN.search(html)
+    if match:
+        return match.group(1), match.group(2)
+    return "", ""
+
+
+def fetch_html_in_page(page: Page, url: str) -> str:
+    """一覧タブを動かさず、詳細HTMLを取得する。"""
+    try:
+        html = page.evaluate(
+            """async (url) => {
+                const response = await fetch(url, {
+                    credentials: 'include',
+                    redirect: 'follow',
+                });
+                if (!response.ok) {
+                    return '';
+                }
+                return await response.text();
+            }""",
+            url,
+        )
+    except PlaywrightError as exc:
+        print(f"  詳細HTMLを取得できませんでした: {url} ({exc})", flush=True)
+        return ""
+    return html or ""
+
+
+def _background_detail_page(page: Page, worker_box: dict[str, Page]) -> Page:
+    """座標取得用の裏タブを1枚だけ作る。一覧タブは前面に戻す。"""
+    worker = worker_box.get("page")
+    if worker is not None:
+        try:
+            if not worker.is_closed():
+                return worker
+        except PlaywrightError:
+            pass
+    worker = page.context.new_page()
+    worker_box["page"] = worker
+    try:
+        page.bring_to_front()
+    except PlaywrightError:
+        pass
+    return worker
+
+
+def _fetch_detail_html_in_background(
+    page: Page,
+    url: str,
+    worker_box: dict[str, Page],
+) -> str:
+    """fetch で座標が取れないときだけ、裏タブで詳細を読む。"""
+    worker = _background_detail_page(page, worker_box)
+    try:
+        worker.goto(url, wait_until="domcontentloaded", timeout=45000)
+        if is_captcha_page(worker):
+            try:
+                page.bring_to_front()
+            except PlaywrightError:
+                pass
+            wait_for_captcha_cleared(worker)
+        try:
+            worker.wait_for_function(
+                "() => {"
+                " const html = document.documentElement.innerHTML;"
+                " return html.includes('\"latitude\"')"
+                " || html.includes('\"ido\"')"
+                " || html.includes('\"keido\"');"
+                "}",
+                timeout=8000,
+            )
+        except PlaywrightTimeoutError:
+            pass
+        return worker.content()
+    except PlaywrightError as exc:
+        print(f"  座標を取得できませんでした: {url} ({exc})", flush=True)
+        return ""
+    finally:
+        try:
+            page.bring_to_front()
+        except PlaywrightError:
+            pass
+
+
+def fetch_detail_coordinates(
+    page: Page,
+    url: str,
+    worker_box: dict[str, Page] | None = None,
+) -> tuple[str, str]:
+    """詳細HTMLから掲載ピンの緯度・経度を返す。一覧タブは開いたままにする。"""
+    if not is_detail_url(url):
+        return "", ""
+
+    html = fetch_html_in_page(page, url)
+    latitude, longitude = parse_coordinates_from_html(html)
+    if latitude and longitude:
+        return latitude, longitude
+
+    if worker_box is None:
+        return "", ""
+    html = _fetch_detail_html_in_background(page, url, worker_box)
+    return parse_coordinates_from_html(html)
+
+
+def close_coordinate_worker(page: Page, worker_box: dict[str, Page]) -> None:
+    """座標取得用の裏タブを閉じ、一覧タブを前面に戻す。"""
+    worker = worker_box.pop("page", None)
+    if worker is None:
+        return
+    try:
+        if not worker.is_closed():
+            worker.close()
+    except PlaywrightError:
+        pass
+    try:
+        page.bring_to_front()
+    except PlaywrightError:
+        pass
+
+
+def fill_city_town_coordinates(
+    page: Page,
+    listings: list[dict[str, str]],
+    cache: dict[str, tuple[str, str]],
+    worker_box: dict[str, Page] | None = None,
+) -> None:
+    """番地の無い一戸建てと、市・町名だけの物件について座標を埋める。"""
+    for item in listings:
+        item.setdefault("latitude", "")
+        item.setdefault("longitude", "")
+        if not needs_athome_coordinates(item):
+            continue
+
+        url = absolute_athome_url(item.get("source_url", ""))
+        if not url or not is_detail_url(url):
+            continue
+        if url in cache:
+            item["latitude"], item["longitude"] = cache[url]
+            continue
+
+        print(f"  座標を取得中: {item.get('property_name', '')} {url}", flush=True)
+        latitude, longitude = fetch_detail_coordinates(page, url, worker_box)
+        cache[url] = (latitude, longitude)
+        item["latitude"] = latitude
+        item["longitude"] = longitude
+        if latitude and longitude:
+            print(f"    緯度 {latitude} / 経度 {longitude}", flush=True)
+        else:
+            print("    座標は見つかりませんでした", flush=True)
+        time.sleep(random.uniform(0.8, 1.8))
+
+
 def extract_features_from_text(text: str) -> str:
     """テキストから物件の特徴（建物種別など）を抽出する。"""
     match = _active_config.feature_pattern.search(text)
@@ -368,6 +623,9 @@ def wait_for_page_ready(page: Page, extra_ms: int = 2000) -> None:
 def wait_for_listings_ready(page: Page, timeout_ms: int = 20000) -> bool:
     """物件一覧の読み込み完了を待つ。"""
     selectors = (
+        ".property-card",
+        ".property-title",
+        "text=詳細を見る",
         'a[href*="/mansion/"]',
         'a[href*="/kodate/"]',
         'a[href*="/tochi/"]',
@@ -472,9 +730,15 @@ def get_property_card(link: Locator) -> Locator:
     if _active_config.property_type == "kounyu":
         return _get_kounyu_property_card(link)
 
+    property_card = link.locator(
+        "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' property-card ')][1]"
+    )
+    if property_card.count() > 0:
+        return property_card.first
+
     card = link.locator(CARD_CONTAINER_SELECTOR)
     if card.count() > 0:
-        return card
+        return card.first
     return link.locator("xpath=ancestor::tr[1]")
 
 
@@ -594,6 +858,19 @@ def extract_labeled_field(card: Locator, label: str) -> str:
             if sibling.count() > 0:
                 return clean_text(sibling.first.inner_text())
 
+    labels = card.locator("strong")
+    for index in range(min(labels.count(), MAX_LABEL_SCAN_ELEMENTS)):
+        element = labels.nth(index)
+        text = clean_text(element.inner_text())
+        if text != label and not text.startswith(label):
+            continue
+        sibling = element.locator("xpath=following-sibling::span[1]")
+        if sibling.count() == 0:
+            continue
+        value = clean_text(sibling.first.inner_text())
+        if value:
+            return value
+
     return ""
 
 
@@ -631,12 +908,7 @@ def extract_kounyu_listings_from_card(card: Locator, fetched_at: str) -> list[di
         address = extract_address_from_card(card, property_name)
 
     access = extract_labeled_field(card, "交通")
-    features = extract_features_from_text(property_name)
-    if not features:
-        try:
-            features = extract_features_from_text(card.inner_text()[:800])
-        except PlaywrightError:
-            features = ""
+    features = _extract_kounyu_features(card, property_name)
     detail_link = find_first_detail_link_in_card(card)
     source_url = ""
     if detail_link is not None:
@@ -652,13 +924,54 @@ def extract_kounyu_listings_from_card(card: Locator, fetched_at: str) -> list[di
             "room_number": "",
             "features": features,
             "source_url": source_url,
+            "latitude": "",
+            "longitude": "",
             "fetched_at": fetched_at,
         }
     ]
 
 
+def _extract_kounyu_features(card: Locator, property_name: str) -> str:
+    """購入カードの種別を取る。土地面積の「土地」は種別ではない。"""
+    badge = ""
+    icons = card.locator(".title-wrap .square-icon")
+    if icons.count() > 0:
+        badge = clean_text(icons.first.inner_text())
+        features = extract_features_from_text(badge)
+        if features:
+            return features
+    if "リフォーム" in badge or "リノベーション" in badge:
+        try:
+            if card.locator("a[href*='/kodate/']").count() > 0:
+                return "中古一戸建て"
+            if card.locator("a[href*='/mansion/']").count() > 0:
+                return "中古マンション"
+        except PlaywrightError:
+            pass
+    features = extract_features_from_text(property_name)
+    if features:
+        return features
+    try:
+        text = re.sub(r"土地(?:面積|権利|代)", "", card.inner_text()[:800])
+    except PlaywrightError:
+        return ""
+    return extract_features_from_text(text)
+
+
 def _extract_kounyu_property_name(card: Locator) -> str:
     """購入一覧カードから物件名を取得する（見出しタグがない場合のフォールバック）。"""
+    titles = card.locator(".title-wrap__title-text")
+    chosen = ""
+    for index in range(titles.count()):
+        element = titles.nth(index)
+        if element.locator("p").count() > 0:
+            continue
+        text = clean_text(element.inner_text())
+        if text and not _is_kounyu_page_heading(text):
+            chosen = text
+    if chosen:
+        return chosen
+
     for selector in (
         '[class*="title"] a',
         '[class*="title"]',
@@ -693,6 +1006,11 @@ def _extract_kounyu_property_name(card: Locator) -> str:
 
 def extract_property_name(card: Locator) -> str:
     """物件カードから物件名を取得する。"""
+    if _active_config.property_type == "kounyu":
+        titled = _extract_kounyu_property_name(card)
+        if titled:
+            return strip_floor_building_suffix(titled)
+
     heading = card.locator("h2, h3").first
     if heading.count() > 0:
         name = clean_text(heading.inner_text())
@@ -1000,6 +1318,8 @@ def extract_listings_from_card(card: Locator, fetched_at: str) -> list[dict[str,
                 "room_number": extract_room_number_from_row_container(row),
                 "features": features,
                 "source_url": source_url,
+                "latitude": "",
+                "longitude": "",
                 "fetched_at": fetched_at,
             }
         )
@@ -1036,9 +1356,19 @@ def listing_dedup_key(item: dict[str, str]) -> tuple[str, str, str, str]:
     )
 
 
-NEXT_PAGE_LABELS = frozenset({">", "＞", "次へ", "次へ>", "次へ＞", "次へ >", "次へ ＞"})
-NEXT_PAGE_TEXT_PATTERN = re.compile(r"^次へ\s*[>＞]?$")
-BUYALL_LIST_PATH_RE = re.compile(r"/buyall/([^/]+)/list(?:/page(\d+))?/?")
+NEXT_PAGE_LABELS = frozenset({
+    ">",
+    "＞",
+    "次へ",
+    "次へ>",
+    "次へ＞",
+    "次へ >",
+    "次へ ＞",
+    "次のページへ進む",
+})
+NEXT_PAGE_TEXT_PATTERN = re.compile(r"^(?:次のページへ進む|次へ\s*[>＞]?)$")
+# /chintai/.../list/page8/ や /buyall/.../list/ など、list 直前までを保持する
+LIST_PAGE_PATH_RE = re.compile(r"^(.*?/list)(?:/page(\d+))?/?$")
 
 PAGER_SELECTORS = (
     'nav[class*="pager"]',
@@ -1126,18 +1456,23 @@ def _is_next_control_enabled(candidate: Locator, *, in_pager: bool = False) -> b
 
 def _find_pager_area(page: Page) -> Locator | None:
     """ページ番号と次へボタンを含むページャー領域を探す。"""
-    for page_path in (2, 3):
-        page_links = page.locator(f'a[href*="/page{page_path}/"]')
-        if page_links.count() == 0:
-            continue
+    # 8ページ付近では 2・3 へのリンクが窓の外に出る。list/page を広く拾う。
+    list_pagers = page.locator(
+        "ul.pagination__list, ul[class*='pagination__list']"
+    )
+    if list_pagers.count() > 0:
+        return list_pagers.first
+
+    page_links = page.locator('a[href*="/list/page"]')
+    if page_links.count() > 0:
         link = page_links.first
         for xpath in (
+            "xpath=ancestor::ul[contains(@class,'pagination')][1]",
             "xpath=ancestor::nav[1]",
             "xpath=ancestor::ul[1]",
             "xpath=ancestor::*[contains(@class,'pager')][1]",
             "xpath=ancestor::*[contains(@class,'paging')][1]",
-            "xpath=ancestor::*[contains(@class,'pagination')][1]",
-            "xpath=ancestor::div[.//a[contains(@href,'/page')]][1]",
+            "xpath=ancestor::*[contains(@class,'pagination__list')][1]",
         ):
             container = link.locator(xpath)
             if container.count() > 0:
@@ -1147,7 +1482,7 @@ def _find_pager_area(page: Page) -> Locator | None:
         '[class*="paging"]',
         '[class*="pager"]',
         '[class*="Pager"]',
-        '[class*="pagination"]',
+        "ul[class*='pagination']",
         "nav",
     ):
         blocks = page.locator(selector)
@@ -1157,9 +1492,9 @@ def _find_pager_area(page: Page) -> Locator | None:
                 text = block.inner_text()
             except PlaywrightError:
                 continue
-            if not re.search(r"\b1\b", text):
-                continue
-            if "次へ" in text or ">" in text or "＞" in text:
+            if "次のページ" in text or "次へ" in text or ">" in text or "＞" in text:
+                return block
+            if re.search(r"\b1\b", text) and re.search(r"\b2\b", text):
                 return block
     return None
 
@@ -1235,13 +1570,17 @@ def find_page_number_link(page: Page, target_page: int) -> Locator | None:
     return None
 
 
-def parse_buyall_page_number(url: str) -> int:
-    """buyall 一覧 URL からページ番号を取得する（/list/page2/ または q=）。"""
-    match = BUYALL_LIST_PATH_RE.search(urlparse(url).path)
+def parse_list_page_number(url: str) -> int:
+    """一覧 URL からページ番号を取得する（/list/pageN/、buyall の q=）。"""
+    parsed = urlparse(url)
+    match = LIST_PAGE_PATH_RE.search(parsed.path)
     if match and match.group(2):
         return max(1, int(match.group(2)))
 
-    query = parse_qs(urlparse(url).query)
+    if "/buyall/" not in parsed.path:
+        return 1
+
+    query = parse_qs(parsed.query)
     raw = query.get("q", ["1"])[0]
     try:
         return max(1, int(raw))
@@ -1249,28 +1588,40 @@ def parse_buyall_page_number(url: str) -> int:
         return 1
 
 
-def build_buyall_page_url(url: str, page_number: int) -> str:
-    """buyall 一覧 URL を指定ページ用に組み立てる（/list/page2/ 形式）。"""
+def parse_buyall_page_number(url: str) -> int:
+    """buyall 一覧 URL からページ番号を取得する（/list/page2/ または q=）。"""
+    return parse_list_page_number(url)
+
+
+def build_list_page_url(url: str, page_number: int) -> str:
+    """一覧 URL を指定ページ用に組み立てる（/list/pageN/。クエリは維持）。"""
     parsed = urlparse(url)
-    match = BUYALL_LIST_PATH_RE.search(parsed.path)
+    match = LIST_PAGE_PATH_RE.search(parsed.path)
     if not match:
         return url
 
-    prefecture_slug = match.group(1)
+    base = match.group(1)
     if page_number <= 1:
-        new_path = f"/buyall/{prefecture_slug}/list/"
+        new_path = f"{base}/"
     else:
-        new_path = f"/buyall/{prefecture_slug}/list/page{page_number}/"
+        new_path = f"{base}/page{page_number}/"
 
     query = parsed.query
-    if re.search(r"(?:^|[&?])q=\d+", query):
-        new_query = re.sub(r"q=\d+", f"q={page_number}", query)
-    elif query:
-        new_query = f"{query}&q={page_number}"
-    else:
-        new_query = f"q={page_number}"
+    if "/buyall/" in new_path:
+        if re.search(r"(?:^|[&?])q=\d+", query):
+            new_query = re.sub(r"q=\d+", f"q={page_number}", query)
+        elif query:
+            new_query = f"{query}&q={page_number}"
+        else:
+            new_query = f"q={page_number}"
+        query = new_query
 
-    return urlunparse(parsed._replace(path=new_path, query=new_query))
+    return urlunparse(parsed._replace(path=new_path, query=query))
+
+
+def build_buyall_page_url(url: str, page_number: int) -> str:
+    """buyall 一覧 URL を指定ページ用に組み立てる（/list/page2/ 形式）。"""
+    return build_list_page_url(url, page_number)
 
 
 def _buyall_target_page_reached(url: str, target_page: int) -> bool:
@@ -1279,17 +1630,17 @@ def _buyall_target_page_reached(url: str, target_page: int) -> bool:
 
 
 def navigate_buyall_list_page(page: Page, page_number: int) -> bool:
-    """buyall 一覧を /list/pageN/ 形式の URL で直接開く。"""
-    if "/buyall/" not in page.url or "/list/" not in page.url:
-        print("  buyall 一覧 URL ではないため URL 遷移をスキップします", flush=True)
+    """一覧を /list/pageN/ 形式の URL で直接開く（賃貸・購入とも）。"""
+    if "/list/" not in page.url or LIST_PAGE_PATH_RE.search(urlparse(page.url).path) is None:
+        print("  一覧 URL ではないため URL 遷移をスキップします", flush=True)
         return False
 
     if _buyall_target_page_reached(page.url, page_number) and wait_for_listings_ready(page):
         return True
 
-    next_url = build_buyall_page_url(page.url, page_number)
+    next_url = build_list_page_url(page.url, page_number)
     if (
-        parse_buyall_page_number(next_url) <= parse_buyall_page_number(page.url)
+        parse_list_page_number(next_url) <= parse_list_page_number(page.url)
         and next_url.split("?", 1)[0] == page.url.split("?", 1)[0]
     ):
         print("  遷移先 URL を生成できませんでした", flush=True)
@@ -1315,7 +1666,7 @@ def navigate_buyall_list_page(page: Page, page_number: int) -> bool:
 
         if wait_for_listings_ready(page, timeout_ms=15000):
             if _buyall_target_page_reached(page.url, page_number):
-                actual = parse_buyall_page_number(page.url)
+                actual = parse_list_page_number(page.url)
                 print(f"  ページ {actual} の一覧を確認しました", flush=True)
                 return True
 
@@ -1326,7 +1677,7 @@ def navigate_buyall_list_page(page: Page, page_number: int) -> bool:
 
         page.wait_for_timeout(1500)
 
-    actual = parse_buyall_page_number(page.url)
+    actual = parse_list_page_number(page.url)
     print(
         f"  ページ {page_number} の一覧を確認できませんでした（URL上のページ: {actual}）",
         flush=True,
@@ -1335,18 +1686,21 @@ def navigate_buyall_list_page(page: Page, page_number: int) -> bool:
 
 
 def _buyall_page_advanced(page: Page, previous_page: int) -> bool:
-    """buyall 一覧でページ番号が進んだかどうか。"""
-    return parse_buyall_page_number(page.url) > previous_page
+    """一覧でページ番号が進んだかどうか。"""
+    return parse_list_page_number(page.url) > previous_page
 
 
 def advance_to_next_list_page(page: Page, current_page: int) -> bool:
-    """次ページへ進む（buyall は URL 優先 → 次へボタン → ページ番号）。"""
+    """次ページへ進む（URL 優先 → 次へボタン → ページ番号）。"""
     next_page = current_page + 1
-    is_buyall = "/buyall/" in page.url and "/list/" in page.url
+    can_open_by_url = (
+        "/list/" in page.url
+        and LIST_PAGE_PATH_RE.search(urlparse(page.url).path) is not None
+    )
 
     print(f"  ページ {current_page} → {next_page} へ進みます...", flush=True)
 
-    if is_buyall:
+    if can_open_by_url:
         for attempt in range(2):
             if navigate_buyall_list_page(page, next_page):
                 return True
@@ -1364,7 +1718,7 @@ def advance_to_next_list_page(page: Page, current_page: int) -> bool:
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
             if is_athome_list_page(page) and not is_captcha_page(page):
-                if is_buyall:
+                if can_open_by_url:
                     return _buyall_page_advanced(page, current_page)
                 return page.url != url_before
         except PlaywrightError:
@@ -1379,7 +1733,7 @@ def advance_to_next_list_page(page: Page, current_page: int) -> bool:
             page.wait_for_load_state("domcontentloaded", timeout=30000)
             page.wait_for_timeout(3000)
             if is_athome_list_page(page) and not is_captcha_page(page):
-                if is_buyall:
+                if can_open_by_url:
                     return _buyall_page_advanced(page, current_page)
                 return True
         except PlaywrightError:
@@ -1396,7 +1750,9 @@ def find_next_page_button(page: Page) -> Locator | None:
     except PlaywrightError:
         pass
 
-    rel_next = page.locator('a[rel="next"]')
+    rel_next = page.locator(
+        'a[rel="next"], a[aria-label="次のページへ進む"]'
+    )
     if rel_next.count() > 0:
         candidate = rel_next.first
         if _is_next_control_enabled(candidate, in_pager=True):
@@ -1407,7 +1763,10 @@ def find_next_page_button(page: Page) -> Locator | None:
             return candidate
 
     try:
-        next_link = page.get_by_role("link", name=re.compile(r"^次へ\s*[>＞]?$"))
+        next_link = page.get_by_role(
+            "link",
+            name=re.compile(r"^(?:次のページへ進む|次へ\s*[>＞]?)$"),
+        )
         if next_link.count() > 0:
             candidate = next_link.first
             if _is_next_control_enabled(candidate, in_pager=True):
@@ -1495,10 +1854,10 @@ def scrape_current_session(
 
     all_listings: list[dict[str, str]] = []
     seen_keys: set[tuple[str, str, str, str]] = set()
+    coordinate_cache: dict[str, tuple[str, str]] = {}
+    coordinate_worker: dict[str, Page] = {}
     page_number = (
-        parse_buyall_page_number(page.url)
-        if "/buyall/" in page.url and "/list/" in page.url
-        else 1
+        parse_list_page_number(page.url) if "/list/" in page.url else 1
     )
 
     try:
@@ -1524,6 +1883,12 @@ def scrape_current_session(
 
             try:
                 page_listings = extract_page_listings(page)
+                fill_city_town_coordinates(
+                    page,
+                    page_listings,
+                    coordinate_cache,
+                    coordinate_worker,
+                )
             except PlaywrightError as exc:
                 save_if_any(all_listings, output_csv)
                 raise ScrapeError(
@@ -1569,8 +1934,8 @@ def scrape_current_session(
                 save_if_any(all_listings, output_csv)
                 raise ScrapeError(f"次ページへの遷移に失敗しました: {exc}") from exc
 
-            if "/buyall/" in page.url and "/list/" in page.url:
-                next_page_number = parse_buyall_page_number(page.url)
+            if "/list/" in page.url:
+                next_page_number = parse_list_page_number(page.url)
                 if next_page_number <= page_number:
                     print(
                         "\nページ番号が進まなかったため、最終ページと判断して終了します。",
@@ -1593,6 +1958,8 @@ def scrape_current_session(
     except Exception as exc:
         save_if_any(all_listings, output_csv)
         raise ScrapeError(f"予期しないエラーが発生しました: {exc}") from exc
+    finally:
+        close_coordinate_worker(page, coordinate_worker)
 
     return all_listings
 
